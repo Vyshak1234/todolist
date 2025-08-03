@@ -28,7 +28,7 @@ jobs:
         run: aws eks update-kubeconfig --name Vyshak-Cluster-dont-touch --region us-east-1
 
       - name: Apply pg_dump job
-        run: kubectl apply -f k8s/jobs/pg-backup-job.yaml
+        run: kubectl apply -f .github/workflows/k8s/jobs/pg-backup-job.yaml
 
   postgres-restore:
     name: Restore DB from S3
@@ -54,7 +54,7 @@ jobs:
         run: aws eks update-kubeconfig --name Vyshak-Cluster-dont-touch --region us-east-1
 
       - name: Apply pg_restore job
-        run: kubectl apply -f k8s/jobs/pg-restore-job.yaml
+        run: kubectl apply -f .github/workflows/k8s/jobs/pg-restore-job.yaml
 
   dev:
     name: Build backend
