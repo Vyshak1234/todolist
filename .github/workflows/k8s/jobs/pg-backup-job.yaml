@@ -2,10 +2,14 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: pgdump-upload-job
+  labels:
+    app: pgdump-upload
 spec:
+  backoffLimit: 1
   template:
     spec:
       serviceAccountName: rds-backup-sa  
+      restartPolicy: Never
       containers:
       - name: pgdump
         image: amazonlinux:2
@@ -14,7 +18,5 @@ spec:
         - |
           yum install -y postgresql awscli &&
           export PGPASSWORD='F4b9$-WWQw(D*yisJjE-?HZ4]koF' &&
-          pg_dump -Fc -h demodb.cod55klsl2aw.us-east-1.rds.amazonaws.com -U adminuser -d demodb > /tmp/demodb.dump
-          aws s3 cp /tmp/demodb.sql s3://acceleraterapptest/demodb-alpha.sql
-      restartPolicy: Never
-  backoffLimit: 1
+          pg_dump -Fc -h demodb.cod55klsl2aw.us-east-1.rds.amazonaws.com -U adminuser -d demodb > /tmp/demodb.dump &&
+          aws s3 cp /tmp/demodb.dump s3://acceleraterapptest/demodb-alpha.dump
