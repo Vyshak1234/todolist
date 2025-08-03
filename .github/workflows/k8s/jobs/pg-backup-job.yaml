@@ -12,11 +12,12 @@ spec:
       restartPolicy: Never
       containers:
       - name: pgdump
-        image: amazonlinux:2
+        image: postgres:14
         command: ["/bin/bash", "-c"]
         args:
         - |
-          yum install -y postgresql awscli &&
+          apt-get update &&
+          apt-get install -y awscli &&
           export PGPASSWORD='F4b9$-WWQw(D*yisJjE-?HZ4]koF' &&
           pg_dump -Fc -h demodb.cod55klsl2aw.us-east-1.rds.amazonaws.com -U adminuser -d demodb > /tmp/demodb.dump &&
           aws s3 cp /tmp/demodb.dump s3://acceleraterapptest/demodb-alpha.dump
