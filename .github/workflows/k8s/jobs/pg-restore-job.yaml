@@ -2,10 +2,14 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: pgrestore-create-alpha-job
+  labels:
+    app: pgrestore-create-alpha
 spec:
+  backoffLimit: 1
   template:
     spec:
       serviceAccountName: rds-backup-sa
+      restartPolicy: Never
       containers:
       - name: pgrestore
         image: postgres:14
@@ -18,7 +22,6 @@ spec:
           echo "Creating alpha DB..." &&
           psql -h demodb.cod55klsl2aw.us-east-1.rds.amazonaws.com -U adminuser -d demodb -c "CREATE DATABASE alpha;" &&
           echo "Downloading and restoring..." &&
-          aws s3 cp s3://acceleraterapptest/demodb-alpha.sql /tmp/dump.sql &&
+          aws s3 cp s3://acceleraterapptest/demodb-alpha.dump /tmp/demodb.dump &&
           pg_restore -h demodb.cod55klsl2aw.us-east-1.rds.amazonaws.com -U adminuser -d alpha /tmp/demodb.dump
-      restartPolicy: Never
-  backoffLimit: 1
+
