@@ -25,7 +25,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Update kubeconfig for EKS
-        run: aws eks update-kubeconfig --name my-cluster --region us-east-1
+        run: aws eks update-kubeconfig --name Vyshak-Cluster-dont-touch --region us-east-1
 
       - name: Apply pg_dump job
         run: kubectl apply -f k8s/jobs/pg-backup-job.yaml
@@ -51,7 +51,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Update kubeconfig for EKS
-        run: aws eks update-kubeconfig --name my-cluster --region us-east-1
+        run: aws eks update-kubeconfig --name Vyshak-Cluster-dont-touch --region us-east-1
 
       - name: Apply pg_restore job
         run: kubectl apply -f k8s/jobs/pg-restore-job.yaml
