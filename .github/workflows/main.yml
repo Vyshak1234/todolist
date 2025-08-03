@@ -1,5 +1,4 @@
 name: PR – PostgreSQL Backup & Restore Job
-
 on:
   pull_request:
     branches: [main]
@@ -8,14 +7,11 @@ jobs:
   postgres-backup:
     name: Backup DB to S3
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
-
       - name: Set up kubectl
         uses: azure/setup-kubectl@v3
-
       - name: Configure AWS credentials (admin user)
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -23,10 +19,8 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
-
       - name: Update kubeconfig for EKS
         run: aws eks update-kubeconfig --name Vyshak-Cluster-dont-touch --region us-east-1
-
       - name: Apply pg_dump job
         run: kubectl apply -f .github/workflows/k8s/jobs/pg-backup-job.yaml
 
@@ -34,14 +28,11 @@ jobs:
     name: Restore DB from S3
     needs: postgres-backup
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
-
       - name: Set up kubectl
         uses: azure/setup-kubectl@v3
-
       - name: Configure AWS credentials (admin user)
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -49,21 +40,20 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
-
       - name: Update kubeconfig for EKS
         run: aws eks update-kubeconfig --name Vyshak-Cluster-dont-touch --region us-east-1
-
       - name: Apply pg_restore job
         run: kubectl apply -f .github/workflows/k8s/jobs/pg-restore-job.yaml
 
   dev:
-    name: Build backend
+    name: Build and Push Images
     runs-on: ubuntu-latest
     needs: postgres-restore
     environment: development    
     steps:
     - name: Checkout
       uses: actions/checkout@v3
+      
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v2
       with:
@@ -71,26 +61,33 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
         aws-region: us-east-1
+        
     - name: Login to Amazon ECR
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v1
-    - name: Build, tag, and push the image to Amazon ECR
-      id: build-image
+      
+    - name: Set image tag
+      run: echo "IMAGE_TAG=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      
+    - name: Build and push backend image
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         ECR_REPOSITORY: acceleterapptest
-        IMAGE_TAG: $(git rev-parse --short HEAD)
       run: |
-        # Build a docker container and push it to ECR
         cd backend
-        docker build -f Dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:$(git rev-parse --short HEAD) --no-cache .
-        echo "Pushing image to ECR..."
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:alpha-backend$IMAGE_TAG
-        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:alpha-backedn$IMAGE_TAG" >> $GITHUB_OUTPUT
-        cd ..
+        docker build -f Dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:alpha-backend-$IMAGE_TAG --no-cache .
+        echo "Pushing backend image to ECR..."
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:alpha-backend-$IMAGE_TAG
+        echo "backend-image=$ECR_REGISTRY/$ECR_REPOSITORY:alpha-backend-$IMAGE_TAG" >> $GITHUB_OUTPUT
+        
+    - name: Build and push frontend image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: acceleterapptest
+      run: |
         cd frontend
-        docker build -f Dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:$(git rev-parse --short HEAD) --no-cache .
-        echo "Pushing image to ECR..."
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:alpha-frontend$IMAGE_TAG
-        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:alpha-frontend$IMAGE_TAG" >> $GITHUB_OUTPUT
+        docker build -f Dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:alpha-frontend-$IMAGE_TAG --no-cache .
+        echo "Pushing frontend image to ECR..."
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:alpha-frontend-$IMAGE_TAG
+        echo "frontend-image=$ECR_REGISTRY/$ECR_REPOSITORY:alpha-frontend-$IMAGE_TAG" >> $GITHUB_OUTPUT
 
