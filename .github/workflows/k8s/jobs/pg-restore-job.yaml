@@ -1,0 +1,24 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pgrestore-create-alpha-job
+spec:
+  template:
+    spec:
+      serviceAccountName: rds-backup-sa
+      containers:
+      - name: pgrestore
+        image: postgres:14
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          apt-get update &&
+          apt-get install -y awscli &&
+          export PGPASSWORD='F4b9$-WWQw(D*yisJjE-?HZ4]koF' &&
+          echo "Creating alpha DB..." &&
+          psql -h demodb.cod55klsl2aw.us-east-1.rds.amazonaws.com -U adminuser -d demodb -c "CREATE DATABASE alpha;" &&
+          echo "Downloading and restoring..." &&
+          aws s3 cp s3://acceleraterapptest/demodb-alpha.sql /tmp/dump.sql &&
+          pg_restore -h demodb.cod55klsl2aw.us-east-1.rds.amazonaws.com -U adminuser -d alpha /tmp/demodb.dump
+      restartPolicy: Never
+  backoffLimit: 1
