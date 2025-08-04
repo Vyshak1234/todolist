@@ -58,7 +58,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-          
+        
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -98,12 +98,6 @@ jobs:
       - name: Ensure alpha namespace exists
         run: |
           kubectl get namespace alpha || kubectl create namespace alpha
-
-      - name: Get backend LoadBalancer hostname
-        run: |
-          LB_HOST=$(kubectl get svc todo-app-alpha-todo-helm-chart-backend -n alpha -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-          echo "LB Host: $LB_HOST"
-          echo "LB_HOST=$LB_HOST" >> $GITHUB_ENV
   
       - name: Prepare updated values.yaml for alpha deployment
         run: |
@@ -119,7 +113,13 @@ jobs:
           echo "$ARGOCD_APPLICATION" > argocd-app.yaml
           yq eval '.spec.destination.namespace = "alpha"' -i argocd-app.yaml
           yq eval --inplace '
-            .spec.source.helm.values = load_str("values.yaml")' argocd-app.yaml
+            .spec.source.helm.parameters = [
+              {"name": "namespace", "value": "alpha"},
+              {"name": "backend.image.tag", "value": "alpha-backend-" + strenv(IMAGE_TAG)},
+              {"name": "frontend.image.tag", "value": "alpha-frontend-" + strenv(IMAGE_TAG)},
+              {"name": "backend.env.DB_NAME", "value": "alpha"}
+            ]
+          ' argocd-app.yaml
           cat argocd-app.yaml
           kubectl apply -f argocd-app.yaml
 
@@ -144,6 +144,12 @@ jobs:
           argocd app wait todo-app --timeout 300
           argocd app get todo-app
 
+      - name: Get backend LoadBalancer hostname
+        run: |
+          LB_HOST=$(kubectl get svc todo-app-alpha-todo-helm-chart-backend -n alpha -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "LB Host: $LB_HOST"
+          echo "LB_HOST=$LB_HOST" >> $GITHUB_ENV
+
       - name: Update ArgoCD Application with REACT_APP_API_URL
         run: |
           BACKEND_SVC=$(kubectl get svc todo-app-alpha-todo-helm-chart-backend -n alpha -o json)
@@ -152,13 +158,16 @@ jobs:
           echo "FULL_URL=$FULL_URL" >> $GITHUB_ENV
           echo "Updated REACT_APP_API_URL: $FULL_URL"
 
-          # Update values.yaml with the API URL
-          yq eval ".frontend.env.REACT_APP_API_URL = \"$FULL_URL\"" -i values.yaml
-          
           echo "$ARGOCD_APPLICATION" > argocd-app.yaml
           yq eval '.spec.destination.namespace = "alpha"' -i argocd-app.yaml
           yq eval --inplace '
-            .spec.source.helm.values = load_str("values.yaml")' argocd-app.yaml
+            .spec.source.helm.parameters = [
+              {"name": "namespace", "value": "alpha"},
+              {"name": "backend.image.tag", "value": "alpha-backend-" + strenv(IMAGE_TAG)},
+              {"name": "frontend.image.tag", "value": "alpha-frontend-" + strenv(IMAGE_TAG)},
+              {"name": "frontend.env.REACT_APP_API_URL", "value": strenv(FULL_URL)}
+            ]
+          ' argocd-app.yaml
           cat argocd-app.yaml
           kubectl apply -f argocd-app.yaml
 
