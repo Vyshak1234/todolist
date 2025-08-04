@@ -110,17 +110,16 @@ jobs:
         run: |
           echo "$ARGOCD_APPLICATION" > argocd-app.yaml
           yq eval '.spec.destination.namespace = "alpha"' -i argocd-app.yaml
-          NEW_PARAMS=$(yq -n -o=json '
-            [
+          yq eval --inplace '
+            .spec.source.helm.parameters = [
               {"name": "namespace", "value": "alpha"},
-              {"name": "backend.image.tag", "value": "'"$IMAGE_TAG"'-backend"},
-              {"name": "frontend.image.tag", "value": "'"$IMAGE_TAG"'-frontend"},
+              {"name": "backend.image.tag", "value": strenv(IMAGE_TAG) + "-backend"},
+              {"name": "frontend.image.tag", "value": strenv(IMAGE_TAG) + "-frontend"},
               {"name": "backend.env.DB_NAME", "value": "alpha"}
             ]
-          ')
-          echo "$NEW_PARAMS" | yq eval '.spec.source.helm.parameters = input' -i argocd-app.yaml
+          ' argocd-app.yaml
           kubectl apply -f argocd-app.yaml
-  
+
       - name: Wait for backend LoadBalancer to get hostname
         run: |
           for i in {1..10}; do
