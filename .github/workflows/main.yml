@@ -155,9 +155,10 @@ jobs:
           BACKEND_SVC=$(kubectl get svc todo-app-alpha-todo-helm-chart-backend -n alpha -o json)
           PORT=$(echo $BACKEND_SVC | jq -r '.spec.ports[0].port')
           FULL_URL="http://$LB_HOST:$PORT"
-          echo "FULL_URL=$FULL_URL" >> $GITHUB_ENV
           echo "Updated REACT_APP_API_URL: $FULL_URL"
-
+      
+          export FULL_URL="$FULL_URL" 
+      
           echo "$ARGOCD_APPLICATION" > argocd-app.yaml
           yq eval '.spec.destination.namespace = "alpha"' -i argocd-app.yaml
           yq eval --inplace '
@@ -165,7 +166,6 @@ jobs:
               {"name": "namespace", "value": "alpha"},
               {"name": "backend.image.tag", "value": "alpha-backend-" + strenv(IMAGE_TAG)},
               {"name": "frontend.image.tag", "value": "alpha-frontend-" + strenv(IMAGE_TAG)},
-              {"name": "backend.env.DB_NAME", "value": "alpha"},
               {"name": "frontend.env.REACT_APP_API_URL", "value": strenv(FULL_URL)}
             ]
           ' argocd-app.yaml
