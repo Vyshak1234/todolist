@@ -108,6 +108,7 @@ jobs:
         yq eval '.namespace = "alpha"' -i values.yaml
         yq eval '.backend.image.tag = "${{ env.IMAGE_TAG }}-backend"' -i values.yaml
         yq eval '.frontend.image.tag = "${{ env.IMAGE_TAG }}-frontend"' -i values.yaml
+        yq eval '.backend.env.DB_NAME = "alpha"' -i values.yaml
 
     - name: Deploy once to get LoadBalancer hostname
       run: |
@@ -118,6 +119,7 @@ jobs:
             {"name": "namespace", "value": "alpha"},
             {"name": "backend.image.tag", "value": "${{ env.IMAGE_TAG }}-backend"},
             {"name": "frontend.image.tag", "value": "${{ env.IMAGE_TAG }}-frontend"}
+            {"name": "backend.env.DB_NAME", "value": "alpha"}
           ]
         ')
         yq eval '.spec.source.helm.parameters = '"$NEW_PARAMS"'' -i argocd-app.yaml
