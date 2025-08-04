@@ -158,15 +158,14 @@ jobs:
 
           echo "$ARGOCD_APPLICATION" > argocd-app.yaml
           yq eval '.spec.destination.namespace = "alpha"' -i argocd-app.yaml
-          UPDATED_PARAMS=$(yq -n -o=json '
-            [
+          yq eval --inplace '
+            .spec.source.helm.parameters = [
               {"name": "namespace", "value": "alpha"},
-              {"name": "backend.image.tag", "value": "alpha-backend-'"$IMAGE_TAG"'"},
-              {"name": "frontend.image.tag", "value": "alpha-frontend-'"$IMAGE_TAG"'"},
-              {"name": "frontend.env.REACT_APP_API_URL", "value": "'"$FULL_URL"'"}
+              {"name": "backend.image.tag", "value": "alpha-backend-" + strenv(IMAGE_TAG)},
+              {"name": "frontend.image.tag", "value": "alpha-frontend-" + strenv(IMAGE_TAG)},
+              {"name": "frontend.env.REACT_APP_API_URL", "value": strenv(FULL_URL)}
             ]
-          ')
-          echo "$UPDATED_PARAMS" | yq eval '.spec.source.helm.parameters = input' -i argocd-app.yaml
+          ' argocd-app.yaml
           kubectl apply -f argocd-app.yaml
 
       - name: Resync ArgoCD after REACT_APP_API_URL update
