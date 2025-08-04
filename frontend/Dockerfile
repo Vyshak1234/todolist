@@ -8,5 +8,6 @@ RUN npm install
 COPY . .
 
 # Start React dev server (development mode)
+# test
 CMD ["npm", "start"]
 EXPOSE 3000
