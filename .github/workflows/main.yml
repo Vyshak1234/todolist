@@ -103,8 +103,8 @@ jobs:
         run: |
           echo "$VALUES_YAML" > values.yaml
           yq eval '.namespace = "alpha"' -i values.yaml
-          yq eval ".backend.image.tag = \"$IMAGE_TAG-backend\"" -i values.yaml
-          yq eval ".frontend.image.tag = \"$IMAGE_TAG-frontend\"" -i values.yaml
+          yq eval ".backend.image.tag = \"alpha-backend-$IMAGE_TAG\"" -i values.yaml
+          yq eval ".frontend.image.tag = \"alpha-frontend-$IMAGE_TAG\"" -i values.yaml
           yq eval '.backend.env.DB_NAME = "alpha"' -i values.yaml
   
       - name: Deploy ArgoCD Application (initial)
@@ -114,8 +114,8 @@ jobs:
           yq eval --inplace '
             .spec.source.helm.parameters = [
               {"name": "namespace", "value": "alpha"},
-              {"name": "backend.image.tag", "value": strenv(IMAGE_TAG) + "-backend"},
-              {"name": "frontend.image.tag", "value": strenv(IMAGE_TAG) + "-frontend"},
+              {"name": "backend.image.tag", "value": "alpha-backend-" + strenv(IMAGE_TAG)},
+              {"name": "frontend.image.tag", "value": "alpha-frontend-" + strenv(IMAGE_TAG)},
               {"name": "backend.env.DB_NAME", "value": "alpha"}
             ]
           ' argocd-app.yaml
@@ -170,8 +170,8 @@ jobs:
           UPDATED_PARAMS=$(yq -n -o=json '
             [
               {"name": "namespace", "value": "alpha"},
-              {"name": "backend.image.tag", "value": "'"$IMAGE_TAG"'-backend"},
-              {"name": "frontend.image.tag", "value": "'"$IMAGE_TAG"'-frontend"},
+              {"name": "backend.image.tag", "value": "alpha-backend-'"$IMAGE_TAG"'"},
+              {"name": "frontend.image.tag", "value": "alpha-frontend-'"$IMAGE_TAG"'"},
               {"name": "frontend.env.REACT_APP_API_URL", "value": "'"$FULL_URL"'"}
             ]
           ')
