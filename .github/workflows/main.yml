@@ -118,7 +118,7 @@ jobs:
           [
             {"name": "namespace", "value": "alpha"},
             {"name": "backend.image.tag", "value": "${{ env.IMAGE_TAG }}-backend"},
-            {"name": "frontend.image.tag", "value": "${{ env.IMAGE_TAG }}-frontend"}
+            {"name": "frontend.image.tag", "value": "${{ env.IMAGE_TAG }}-frontend"},
             {"name": "backend.env.DB_NAME", "value": "alpha"}
           ]
         ')
