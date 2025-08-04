@@ -198,11 +198,12 @@ jobs:
           echo "Frontend pods: $FRONTEND_PODS"
           kubectl get pods -n alpha -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,READY:.status.containerStatuses[0].ready
           kubectl get endpoints -n alpha
+          kubectl delete job pgrestore-create-alpha-job
+          kubectl delete job pgdump-upload-job
 
       - name: Clean up temporary files
         run: | 
           rm -f values.yaml argocd-app.yaml
-          kubectl delete job pgrestore-create-alpha-job
-          kubectl delete job pgdump-upload-job
+
           
           
