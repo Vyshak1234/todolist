@@ -22,6 +22,6 @@ spec:
           echo "Creating alpha DB..." &&
           psql -h demodb.cod55klsl2aw.us-east-1.rds.amazonaws.com -U adminuser -d demodb -c "CREATE DATABASE alpha;" &&
           echo "Downloading and restoring..." &&
-          aws s3 cp s3://acceleraterapptest/demodb-alpha.dump /tmp/demodb.dump &&
-          pg_restore -h demodb.cod55klsl2aw.us-east-1.rds.amazonaws.com -U adminuser -d alpha /tmp/demodb.dump
+          aws s3 cp s3://acceleraterapptest/todolist-alpha.dump /tmp/todolist.dump &&
+          pg_restore -h demodb.cod55klsl2aw.us-east-1.rds.amazonaws.com -U adminuser -d alpha /tmp/todolist.dump
 
