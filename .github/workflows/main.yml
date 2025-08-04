@@ -165,6 +165,7 @@ jobs:
               {"name": "namespace", "value": "alpha"},
               {"name": "backend.image.tag", "value": "alpha-backend-" + strenv(IMAGE_TAG)},
               {"name": "frontend.image.tag", "value": "alpha-frontend-" + strenv(IMAGE_TAG)},
+              {"name": "backend.env.DB_NAME", "value": "alpha"},
               {"name": "frontend.env.REACT_APP_API_URL", "value": strenv(FULL_URL)}
             ]
           ' argocd-app.yaml
