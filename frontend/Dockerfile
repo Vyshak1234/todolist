@@ -10,3 +10,4 @@ COPY . .
 # Start React dev server (development mode)
 CMD ["npm", "start"]
 EXPOSE 3000
+# test alpha
