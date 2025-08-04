@@ -199,4 +199,9 @@ jobs:
           kubectl get endpoints -n alpha
 
       - name: Clean up temporary files
-        run: rm -f values.yaml argocd-app.yaml
+        run: | 
+          rm -f values.yaml argocd-app.yaml
+          kubectl delete job pgrestore-create-alpha-job
+          kubectl delete job pgdump-upload-job
+          
+          
