@@ -106,6 +106,7 @@ jobs:
           yq eval ".backend.image.tag = \"alpha-backend-$IMAGE_TAG\"" -i values.yaml
           yq eval ".frontend.image.tag = \"alpha-frontend-$IMAGE_TAG\"" -i values.yaml
           yq eval '.backend.env.DB_NAME = "alpha"' -i values.yaml
+          cat values.yaml
   
       - name: Deploy ArgoCD Application (initial)
         run: |
@@ -119,6 +120,7 @@ jobs:
               {"name": "backend.env.DB_NAME", "value": "alpha"}
             ]
           ' argocd-app.yaml
+          cat argocd-app.yaml
           kubectl apply -f argocd-app.yaml
 
       - name: Install ArgoCD CLI
@@ -166,6 +168,7 @@ jobs:
               {"name": "frontend.env.REACT_APP_API_URL", "value": strenv(FULL_URL)}
             ]
           ' argocd-app.yaml
+          cat argocd-app.yaml
           kubectl apply -f argocd-app.yaml
 
       - name: Resync ArgoCD after REACT_APP_API_URL update
