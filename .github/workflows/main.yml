@@ -142,24 +142,15 @@ jobs:
           argocd app wait todo-app --timeout 300
           argocd app get todo-app
 
-      - name: Wait for backend LoadBalancer to get hostname
+      - name: Get backend LoadBalancer hostname
         run: |
-          for outer in {1..10}; do
-            for inner in {1..10}; do
-              LB_HOST=$(kubectl get svc backend -n alpha -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-              if [ -n "$LB_HOST" ]; then
-                echo "LB Host found: $LB_HOST"
-                echo "LB_HOST=$LB_HOST" >> $GITHUB_ENV
-                break 2
-              fi
-              echo "Waiting for LoadBalancer hostname... attempt $inner"
-              sleep 10
-            done
-          done
+          LB_HOST=$(kubectl get svc todo-app-alpha-todo-helm-chart-backend -n alpha -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "LB Host: $LB_HOST"
+          echo "LB_HOST=$LB_HOST" >> $GITHUB_ENV
 
       - name: Update ArgoCD Application with REACT_APP_API_URL
         run: |
-          BACKEND_SVC=$(kubectl get svc backend -n alpha -o json)
+          BACKEND_SVC=$(kubectl get svc todo-app-alpha-todo-helm-chart-backend -n alpha -o json)
           PORT=$(echo $BACKEND_SVC | jq -r '.spec.ports[0].port')
           FULL_URL="http://$LB_HOST:$PORT"
           echo "FULL_URL=$FULL_URL" >> $GITHUB_ENV
