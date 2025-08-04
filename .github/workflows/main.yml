@@ -96,49 +96,23 @@ jobs:
         echo "frontend-image=$ECR_REGISTRY/$ECR_REPOSITORY:alpha-frontend-$IMAGE_TAG" >> $GITHUB_OUTPUT
 
     - name: Configure kubectl for ArgoCD
-      run: |
-        aws eks update-kubeconfig --name Vyshak-Cluster-dont-touch --region us-east-1
+      run: aws eks update-kubeconfig --name Vyshak-Cluster-dont-touch --region us-east-1
 
     - name: Ensure alpha namespace exists
       run: |
         kubectl get namespace alpha || kubectl create namespace alpha
-        echo "Confirmed alpha namespace exists and is ready for deployment"
 
     - name: Prepare updated values.yaml for alpha deployment
       run: |
-        # Create values.yaml from the variable
         echo "$VALUES_YAML" > values.yaml
-        
-        echo "Original values.yaml:"
-        cat values.yaml
-        echo "===================="
-        
-        # Ensure namespace is set to alpha
         yq eval '.namespace = "alpha"' -i values.yaml
-        
-        # Update backend image tag for alpha
         yq eval '.backend.image.tag = "${{ env.IMAGE_TAG }}-backend"' -i values.yaml
-        
-        # Update frontend image tag for alpha
         yq eval '.frontend.image.tag = "${{ env.IMAGE_TAG }}-frontend"' -i values.yaml
-        
-        echo "Updated values.yaml for alpha deployment:"
-        cat values.yaml
-        echo "===================="
 
-    - name: Update ArgoCD Application for alpha namespace
+    - name: Deploy once to get LoadBalancer hostname
       run: |
-        # Parse the ArgoCD Application from variable
         echo "$ARGOCD_APPLICATION" > argocd-app.yaml
-        
-        echo "Original ArgoCD Application:"
-        cat argocd-app.yaml
-        echo "===================="
-        
-        # Ensure the application targets alpha namespace
         yq eval '.spec.destination.namespace = "alpha"' -i argocd-app.yaml
-        
-        # Create new parameters array with our alpha image tags and namespace
         NEW_PARAMS=$(yq eval -n '
           [
             {"name": "namespace", "value": "alpha"},
@@ -146,20 +120,44 @@ jobs:
             {"name": "frontend.image.tag", "value": "${{ env.IMAGE_TAG }}-frontend"}
           ]
         ')
-        
-        # Update the ArgoCD Application with new parameters
         yq eval '.spec.source.helm.parameters = '"$NEW_PARAMS"'' -i argocd-app.yaml
-        
-        echo "Updated ArgoCD Application for alpha namespace:"
-        cat argocd-app.yaml
-        echo "===================="
-        
-        # Apply the updated ArgoCD Application
+        kubectl apply -f argocd-app.yaml
+
+    - name: Wait for backend LoadBalancer to get hostname
+      run: |
+        for i in {1..10}; do
+          LB_HOST=$(kubectl get svc backend -n alpha -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          if [ -n "$LB_HOST" ]; then echo "LB Host found: $LB_HOST"; break; fi
+          echo "Waiting for LoadBalancer hostname... attempt $i"
+          sleep 10
+        done
+
+    - name: Update REACT_APP_API_URL in values.yaml
+      run: |
+        BACKEND_SVC=$(kubectl get svc backend -n alpha -o json)
+        LB_HOST=$(echo $BACKEND_SVC | jq -r '.status.loadBalancer.ingress[0].hostname')
+        PORT=$(echo $BACKEND_SVC | jq -r '.spec.ports[0].port')
+        FULL_URL="http://$LB_HOST:$PORT"
+        yq eval ".frontend.env.REACT_APP_API_URL = \"$FULL_URL\"" -i values.yaml
+        echo "Updated REACT_APP_API_URL: $FULL_URL"
+
+    - name: Update ArgoCD Application with updated values
+      run: |
+        echo "$ARGOCD_APPLICATION" > argocd-app.yaml
+        yq eval '.spec.destination.namespace = "alpha"' -i argocd-app.yaml
+        NEW_PARAMS=$(yq eval -n '
+          [
+            {"name": "namespace", "value": "alpha"},
+            {"name": "backend.image.tag", "value": "${{ env.IMAGE_TAG }}-backend"},
+            {"name": "frontend.image.tag", "value": "${{ env.IMAGE_TAG }}-frontend"},
+            {"name": "frontend.env.REACT_APP_API_URL", "value": "'"$FULL_URL"'"}
+          ]
+        ')
+        yq eval '.spec.source.helm.parameters = '"$NEW_PARAMS"'' -i argocd-app.yaml
         kubectl apply -f argocd-app.yaml
 
     - name: Install ArgoCD CLI
       run: |
-        # Install ArgoCD CLI using wget
         wget -O argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
         sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
         rm argocd-linux-amd64
@@ -171,73 +169,29 @@ jobs:
         ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
         ARGOCD_PASSWORD: ${{ secrets.ARGOCD_PASSWORD }}
       run: |
-        echo "Logging into ArgoCD for alpha deployment..."
-        
-        # Login to ArgoCD (skip TLS verification for self-signed certs)
         argocd login $ARGOCD_SERVER --username $ARGOCD_USERNAME --password $ARGOCD_PASSWORD --insecure
-        
-        echo "Triggering ArgoCD sync for alpha namespace..."
-        
-        # Sync the application to alpha namespace
         argocd app sync todo-app --force
-        
-        echo "ArgoCD sync triggered for alpha deployment!"
 
     - name: Wait for alpha deployment to complete
-      env:
-        ARGOCD_SERVER: ${{ vars.ARGOCD_SERVER }}
       run: |
-        echo "Waiting for ArgoCD to sync and deploy to alpha namespace..."
-        
-        # Wait for sync using ArgoCD CLI
         argocd app wait todo-app --timeout 300
-        
-        # Get application status
-        echo "=== ArgoCD Application Status ==="
         argocd app get todo-app
 
     - name: Verify alpha namespace deployment
       run: |
-        echo "=== Checking alpha namespace deployment status ==="
-        kubectl get pods -n alpha -o wide || echo "Could not get pods in alpha namespace"
-        kubectl get services -n alpha || echo "Could not get services in alpha namespace"
-        kubectl get deployments -n alpha || echo "Could not get deployments in alpha namespace"
-        
-        echo ""
-        echo "=== ArgoCD Application Status ==="
-        kubectl get app todo-app -n argocd -o yaml | yq eval '.status' - || echo "Could not get ArgoCD status"
-        
-        echo ""
-        echo "=== Alpha Deployment Summary ==="
-        echo "Target Namespace: alpha"
-        echo "Backend Image: ${{ steps.login-ecr.outputs.registry }}/acceleterapptest:${{ env.IMAGE_TAG }}-backend"
-        echo "Frontend Image: ${{ steps.login-ecr.outputs.registry }}/acceleterapptest:${{ env.IMAGE_TAG }}-frontend"
-        echo "ArgoCD Application: todo-app"
-        echo "EKS Cluster: Vyshak-Cluster-dont-touch"
-        echo "AWS Region: us-east-1"
-        echo "Deployment Timestamp: $(date)"
-        echo "=========================="
+        kubectl get pods -n alpha -o wide || true
+        kubectl get services -n alpha || true
+        kubectl get deployments -n alpha || true
+        kubectl get app todo-app -n argocd -o yaml | yq eval '.status' - || true
 
     - name: Validate alpha deployment health
       run: |
-        echo "=== Validating alpha deployment health ==="
-        
-        # Check if pods are running
         BACKEND_PODS=$(kubectl get pods -n alpha -l app=backend --no-headers | wc -l)
         FRONTEND_PODS=$(kubectl get pods -n alpha -l app=frontend --no-headers | wc -l)
-        
-        echo "Backend pods in alpha: $BACKEND_PODS"
-        echo "Frontend pods in alpha: $FRONTEND_PODS"
-        
-        # Check pod status
+        echo "Backend pods: $BACKEND_PODS"
+        echo "Frontend pods: $FRONTEND_PODS"
         kubectl get pods -n alpha -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,READY:.status.containerStatuses[0].ready
-        
-        # Verify services are accessible
         kubectl get endpoints -n alpha
-        
-        echo "Alpha deployment validation complete!"
 
     - name: Clean up temporary files
-      run: |
-        rm -f values.yaml argocd-app.yaml
-
+      run: rm -f values.yaml argocd-app.yaml
