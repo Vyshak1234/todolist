@@ -1,0 +1,14 @@
+name: MongoDB Clone Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mongo-clone-action:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: Maggi64/mongo-clone-action@0.3
+        with:
+          source: mongodb+srv://testuser:testpass123@cluster0.xxxxx.mongodb.net/source_db
+          target: mongodb+srv://testuser:testpass123@cluster0.xxxxx.mongodb.net/target_db
