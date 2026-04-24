@@ -1,0 +1,1201 @@
+name: Create Alpha v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      envName:
+        description: "Target environment (alpha1 - alpha99) Enter the branch"
+        required: true
+        type: string
+
+      branch:
+        type: string
+        description: Monolith backend repo branch name. Make sure it's get builded successfully.
+        required: true
+
+      database:
+        description: 'Which DB to replicate'
+        required: true
+        default: 'Dev'
+        type: choice
+        options:
+          - Dev
+          - Stage
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  MONGO_TARGET_USERNAME: ${{ secrets.MONGO_TARGET_USERNAME }}
+  MONGO_TARGET_PASSWORD: ${{ secrets.MONGO_TARGET_PASSWORD }}
+  MONGO_SOURCE_URI_DEV: ${{ secrets.MONGO_SOURCE_URI_DEV }}
+  MONGO_SOURCE_URI_STG: ${{ secrets.MONGO_SOURCE_URI_STG }}
+  GIT_ACTION_ROLE: ${{ secrets.GIT_ACTION_ROLE }}
+  GIT_ACTION_EKS_ROLE: ${{ secrets.GIT_ACTION_EKS_ROLE }}
+  GIT_ACTION_ECR_ROLE: ${{ secrets.GIT_ACTION_ECR_ROLE }}
+  REGION: ${{ vars.REGION }}
+  CLUSTER_NAME: ${{ vars.CLUSTER_NAME }}
+  POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+  POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+  POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+  POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+  SOURCE_POSTGRES_HOST: ${{ secrets.SOURCE_POSTGRES_HOST }}
+  SOURCE_POSTGRES_DB: ${{ secrets.SOURCE_POSTGRES_DB }}
+  SOURCE_POSTGRES_USER: ${{ secrets.SOURCE_POSTGRES_USER }}
+  SOURCE_POSTGRES_PASSWORD: ${{ secrets.SOURCE_POSTGRES_PASSWORD }}
+  CREATEALPHAPAT: ${{ secrets.CREATEALPHAPAT }}
+  ACCLERATORAPP_APPLICATION: ${{ vars.ACCLERATORAPP_APPLICATION }}
+  ACCLERATORAPP_WORKER_APPLICATION: ${{ vars.ACCLERATORAPP_WORKER_APPLICATION }}
+  ADMIN_PANEL_APPLICATION: ${{ vars.ADMIN_PANEL_APPLICATION }}
+  CALENDAR_PRIVATE_APPLICATION: ${{ vars.CALENDAR_PRIVATE_APPLICATION }}
+  CALENDAR_PUBLIC_APPLICATION: ${{ vars.CALENDAR_PUBLIC_APPLICATION }}
+  AVAILABILITY_PRIVATE_APPLICATION: ${{ vars.AVAILABILITY_PRIVATE }}
+  USER_PRIVATE_APPLICATION: ${{ vars.USER_PRIVATE_APPLICATION }}
+  HOSTEDZONE_ID: ${{ secrets.HOSTEDZONE_ID }}
+
+
+
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Input envName, it should be between alpha4-alpha99
+        id: check_input
+        run: |
+          envName="${{ github.event.inputs.envName }}"
+          prefix="alpha"
+          num=${envName#$prefix}
+
+          if [[ $envName == $prefix* ]] && [ "$num" -ge 4 ] && [ "$num" -le 99 ]; then
+              echo "INPUT_VALID=true" >> $GITHUB_ENV
+          else
+              echo "INPUT_VALID=false" >> $GITHUB_ENV
+          fi
+
+      - name: Fail on Invalid Input envName
+        if: env.INPUT_VALID == 'false'
+        run: |
+          echo "Input $envName is not valid"
+          echo "Add valid alpha env name, acceptable value is alpha4-alpha99"
+          exit 1
+
+      - name: Continue on Valid Input envName
+        if: env.INPUT_VALID != 'false'
+        run: |
+          echo "Input $envName is valid"
+
+      - name: Extract env number
+        id: extract_env
+        run: |
+          envName="${{ github.event.inputs.envName }}"
+          prefix="alpha"
+          num=${envName#$prefix}
+
+          echo "ENV_NUM=$num" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials (OIDC role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_ROLE }}
+          role-session-name: github-actions-oidc
+          aws-region: ${{ env.REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Configure AWS credentials (EKS access)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_EKS_ROLE }}
+          role-chaining: true
+          role-session-name: github-actions-role-chaining
+          aws-region: ${{ env.REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+
+      - name: Create Namespace in EKS
+        run: |
+          NAMESPACE="alpha-monolith-${ENV_NUM}"
+          echo "Creating namespace: $NAMESPACE"
+
+          kubectl create namespace $NAMESPACE || echo "Namespace already exists"
+
+  create-mongo:
+    runs-on: ubuntu-latest
+    needs: validation
+
+    steps:
+      - name: Configure AWS credentials (OIDC role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_ROLE }}
+          role-session-name: github-actions-oidc
+          aws-region: ${{ env.REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Configure AWS credentials (EKS access)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_EKS_ROLE }}
+          role-chaining: true
+          role-session-name: github-actions-role-chaining
+          aws-region: ${{ env.REGION }}
+
+      - name: Create SSM parameter if not exist
+        run: |
+          parameter_name="${{ github.event.inputs.envName }}-stack"
+
+          if ! aws ssm get-parameter --name "$parameter_name" > /dev/null 2>&1; then
+            echo "Creating parameter $parameter_name"
+            aws ssm put-parameter \
+              --name "$parameter_name" \
+              --value "$parameter_name" \
+              --type "String"
+          else
+            echo "Parameter already exists"
+          fi
+
+      - name: Check MongoDB status
+        run: |
+          value=$(aws ssm get-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --query 'Parameter.Value' \
+            --output text)
+
+          if [[ "$value" == *"mongodb-done"* ]]; then
+            echo "MONGODB_DONE=true" >> $GITHUB_ENV
+          else
+            echo "MONGODB_DONE=false" >> $GITHUB_ENV
+          fi
+        
+      - name: Debug
+        run: |
+          echo "Does MongoDB already exist?: $MONGODB_DONE"
+
+      - name: Extract env number
+        id: extract_env
+        run: |
+          envName="${{ github.event.inputs.envName }}"
+          prefix="alpha"
+          num=${envName#$prefix}
+
+          echo "ENV_NUM=$num" >> $GITHUB_ENV
+
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+
+      - name: Set up pvc for mongodb
+        run: envsubst < .github/workflows/k8s/jobs/alpha/mongo/pvc.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+
+      - name: Validate pvc for mongodb
+        run: kubectl get pvc mongo-pvc -n alpha-monolith-${ENV_NUM} 
+
+      - name: Set up secret for mongodb
+        run: envsubst < .github/workflows/k8s/jobs/alpha/mongo/secret.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+          MONGO_TARGET_USERNAME: ${{ env.MONGO_TARGET_USERNAME }}
+          MONGO_TARGET_PASSWORD: ${{ env.MONGO_TARGET_PASSWORD }}
+
+      - name: Validate secret for mongodb
+        run: kubectl get secret mongo-secret -n alpha-monolith-${ENV_NUM} 
+
+      - name: Set up deployment for mongodb
+        run: envsubst < .github/workflows/k8s/jobs/alpha/mongo/deployment.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+
+      - name: Validate deployment for mongodb
+        run: kubectl get deployment mongodb -n alpha-monolith-${ENV_NUM}
+
+      - name: Set up service for mongodb
+        run: envsubst < .github/workflows/k8s/jobs/alpha/mongo/service.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+        
+      - name: Validate service for mongodb
+        run: kubectl get svc mongodb -n alpha-monolith-${ENV_NUM}
+
+      - name: Set up mongodb restore
+        run: envsubst < .github/workflows/k8s/jobs/alpha/mongo/mongo-restore.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          SOURCE_URI: ${{ 
+            github.event.inputs.database == 'Dev' && secrets.MONGO_SOURCE_URI_DEV || 
+            secrets.MONGO_SOURCE_URI_STG 
+          }}
+          MONGO_TARGET_USERNAME: ${{ env.MONGO_TARGET_USERNAME }}
+          MONGO_TARGET_PASSWORD: ${{ env.MONGO_TARGET_PASSWORD }}
+
+      - name: Update SSM after MongoDB creation
+        if: ${{ env.MONGODB_DONE == 'false' }}
+        run: |
+          currentValue=$(aws ssm get-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --query 'Parameter.Value' \
+            --output text)
+
+          if [[ "$currentValue" != *"mongodb-done"* ]]; then
+            UpdateValue="$currentValue,mongodb-done"
+          else
+            UpdateValue="$currentValue"
+          fi
+
+          aws ssm put-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --value "$UpdateValue" \
+            --type String \
+            --overwrite
+
+  create-postgres:
+    runs-on: ubuntu-latest
+    needs: create-mongo
+    steps:
+    
+      - name: Configure AWS credentials (OIDC role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_ROLE }}
+          role-session-name: github-actions-oidc
+          aws-region: ${{ env.REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Configure AWS credentials (EKS access)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_EKS_ROLE }}
+          role-chaining: true
+          role-session-name: github-actions-role-chaining
+          aws-region: ${{ env.REGION }}
+
+      - name: Check Postgres status
+        run: |
+          value=$(aws ssm get-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --query 'Parameter.Value' \
+            --output text)
+
+          if [[ "$value" == *"postgres-done"* ]]; then
+            echo "POSTGRES_DONE=true" >> $GITHUB_ENV
+          else
+            echo "POSTGRES_DONE=false" >> $GITHUB_ENV
+          fi
+
+      - name: Debug
+        run: echo "Does Postgres already exist?: $POSTGRES_DONE"
+
+      - name: Extract env number
+        id: extract_env
+        run: |
+          envName="${{ github.event.inputs.envName }}"
+          prefix="alpha"
+          num=${envName#$prefix}
+
+          echo "ENV_NUM=$num" >> $GITHUB_ENV
+
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+
+      - name: Set up pvc for postgres
+        run: envsubst < .github/workflows/k8s/jobs/alpha/postgres/pvc.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+
+      - name: Validate pvc for postgres
+        run: kubectl get pvc postgres-pvc -n alpha-monolith-${ENV_NUM} 
+
+      - name: Set up secret for postgres
+        run: envsubst < .github/workflows/k8s/jobs/alpha/postgres/secret.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+
+      - name: Validate secret for postgres
+        run: kubectl get secret postgres-secret -n alpha-monolith-${ENV_NUM} 
+
+      - name: Set up deployment for postgres
+        run: envsubst < .github/workflows/k8s/jobs/alpha/postgres/deployment.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+
+      - name: Validate deployment for postgres
+        run: kubectl get deployment postgres -n alpha-monolith-${ENV_NUM}
+
+      - name: Set up service for postgres
+        run: envsubst < .github/workflows/k8s/jobs/alpha/postgres/service.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+        
+      - name: Validate service for postgres
+        run: kubectl get svc postgres -n alpha-monolith-${ENV_NUM}
+
+      - name: Set up postgres restore
+        run: envsubst < .github/workflows/k8s/jobs/alpha/postgres/postgres-restore.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_HOST: ${{ env.POSTGRES_HOST }}
+          SOURCE_POSTGRES_HOST: ${{ env.SOURCE_POSTGRES_HOST }}
+          SOURCE_POSTGRES_DB: ${{ env.SOURCE_POSTGRES_DB }}
+          SOURCE_POSTGRES_USER: ${{ env.SOURCE_POSTGRES_USER }}
+          SOURCE_POSTGRES_PASSWORD: ${{ env.SOURCE_POSTGRES_PASSWORD }}
+
+      - name: Update SSM after Postgres creation
+        if: ${{ env.POSTGRES_DONE == 'false' }}
+        run: |
+          currentValue=$(aws ssm get-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --query 'Parameter.Value' \
+            --output text)
+
+          if [[ "$currentValue" != *"postgres-done"* ]]; then
+            UpdateValue="$currentValue,postgres-done"
+          else
+            UpdateValue="$currentValue"
+          fi
+
+          aws ssm put-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --value "$UpdateValue" \
+            --type String \
+            --overwrite
+
+  create-redis:
+    runs-on: ubuntu-latest
+    needs: create-postgres
+    steps:
+
+      - name: Configure AWS credentials (OIDC role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_ROLE }}
+          role-session-name: github-actions-oidc
+          aws-region: ${{ env.REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Configure AWS credentials (EKS access)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_EKS_ROLE }}
+          role-chaining: true
+          role-session-name: github-actions-role-chaining
+          aws-region: ${{ env.REGION }}
+
+      - name: Check Redis status
+        run: |
+          value=$(aws ssm get-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --query 'Parameter.Value' \
+            --output text)
+
+          if [[ "$value" == *"redis-done"* ]]; then
+            echo "REDIS_DONE=true" >> $GITHUB_ENV
+          else
+            echo "REDIS_DONE=false" >> $GITHUB_ENV
+          fi
+
+      - name: Debug
+        run: echo "Does Redis already exist?: $REDIS_DONE"
+
+      - name: Extract env number
+        id: extract_env
+        run: |
+          envName="${{ github.event.inputs.envName }}"
+          prefix="alpha"
+          num=${envName#$prefix}
+
+          echo "ENV_NUM=$num" >> $GITHUB_ENV
+
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+
+      - name: Set up pvc for redis
+        run: envsubst < .github/workflows/k8s/jobs/alpha/redis/pvc.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+
+      - name: Validate pvc for redis
+        run: kubectl get pvc redis-pvc -n alpha-monolith-${ENV_NUM}
+
+      - name: Set up deployment for redis
+        run: envsubst < .github/workflows/k8s/jobs/alpha/redis/deployment.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+
+      - name: Validate deployment for redis
+        run: kubectl get deployment redis -n alpha-monolith-${ENV_NUM}
+
+      - name: Set up service for redis
+        run: envsubst < .github/workflows/k8s/jobs/alpha/redis/service.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
+        env:
+          ENV_NUM: ${{ env.ENV_NUM }}
+        
+      - name: Validate service for redis
+        run: kubectl get svc redis -n alpha-monolith-${ENV_NUM}
+
+      - name: Update SSM after Redis creation
+        if: ${{ env.REDIS_DONE == 'false' }}
+        run: |
+          currentValue=$(aws ssm get-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --query 'Parameter.Value' \
+            --output text)
+
+          if [[ "$currentValue" != *"redis-done"* ]]; then
+            UpdateValue="$currentValue,redis-done"
+          else
+            UpdateValue="$currentValue"
+          fi
+
+          aws ssm put-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --value "$UpdateValue" \
+            --type String \
+            --overwrite
+
+  create-secret:
+    runs-on: ubuntu-latest
+    needs: create-postgres
+    steps:
+
+      - name: Configure AWS credentials (OIDC role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_ROLE }}
+          role-session-name: github-actions-oidc
+          aws-region: ${{ env.REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Configure AWS credentials (EKS access)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_EKS_ROLE }}
+          role-chaining: true
+          role-session-name: github-actions-role-chaining
+          aws-region: ${{env.REGION}}
+
+      - name: Check SECRET status
+        run: |
+          value=$(aws ssm get-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --query 'Parameter.Value' \
+            --output text)
+
+          if [[ "$value" == *"secret-done"* ]]; then
+            echo "SECRET_DONE=true" >> $GITHUB_ENV
+          else
+            echo "SECRET_DONE=false" >> $GITHUB_ENV
+          fi
+
+      - name: Extract env number
+        id: extract_env
+        run: |
+          envName="${{ github.event.inputs.envName }}"
+          prefix="alpha"
+          num=${envName#$prefix}
+
+          echo "ENV_NUM=$num" >> $GITHUB_ENV
+
+      - name: Mongo DB url creation
+        run: |
+          NEW_MONGO_URL="mongodb://${MONGO_TARGET_USERNAME}:${MONGO_TARGET_PASSWORD}@mongodb:27017"
+          echo "NEW_MONGO_URL=$NEW_MONGO_URL" >> $GITHUB_ENV
+
+      - name: Duplicate acceleratorapp-dev secret for alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_SECRET="acceleratorapp-dev"
+          NEW_SECRET="acceleratorapp-alpha-${ENV_NUM}"
+
+          echo "Fetching source secret..."
+          SOURCE_SECRET_VALUE=$(aws secretsmanager get-secret-value \
+            --region "$REGION" \
+            --secret-id "$SOURCE_SECRET" \
+            --query SecretString \
+            --output text)
+
+          echo "Preparing updated secret with new MONGODB_URI..."
+          UPDATED_SECRET=$(echo "$SOURCE_SECRET_VALUE" | jq \
+            --arg new_uri "$NEW_MONGO_URL" \
+            '.MONGODB_URI = $new_uri')
+
+          echo "Checking if new secret exists..."
+          if aws secretsmanager describe-secret --secret-id "$NEW_SECRET" >/dev/null 2>&1; then
+            echo "Updating ONLY the new secret..."
+
+            aws secretsmanager put-secret-value \
+              --region "$REGION" \
+              --secret-id "$NEW_SECRET" \
+              --secret-string "$UPDATED_SECRET"
+
+          else
+            echo "Creating new secret..."
+
+            aws secretsmanager create-secret \
+              --region "$REGION" \
+              --name "$NEW_SECRET" \
+              --description "Ephemeral secret for alpha Environment" \
+              --secret-string "$UPDATED_SECRET"
+          fi
+
+          echo "Done."
+
+      - name: Duplicate worker-dev secret for alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_SECRET="worker-dev"
+          NEW_SECRET="worker-alpha-${ENV_NUM}"
+
+          echo "Fetching source secret..."
+          SOURCE_SECRET_VALUE=$(aws secretsmanager get-secret-value \
+            --region "$REGION" \
+            --secret-id "$SOURCE_SECRET" \
+            --query SecretString \
+            --output text)
+
+          echo "Preparing updated secret with new MONGODB_URI..."
+          UPDATED_SECRET=$(echo "$SOURCE_SECRET_VALUE" | jq \
+            --arg new_uri "$NEW_MONGO_URL" \
+            '.MONGODB_URI = $new_uri')
+
+          echo "Checking if new secret exists..."
+          if aws secretsmanager describe-secret --secret-id "$NEW_SECRET" >/dev/null 2>&1; then
+            echo "Updating ONLY the new secret..."
+
+            aws secretsmanager put-secret-value \
+              --region "$REGION" \
+              --secret-id "$NEW_SECRET" \
+              --secret-string "$UPDATED_SECRET"
+
+          else
+            echo "Creating new secret..."
+
+            aws secretsmanager create-secret \
+              --region "$REGION" \
+              --name "$NEW_SECRET" \
+              --description "Ephemeral secret for alpha Environment" \
+              --secret-string "$UPDATED_SECRET"
+          fi
+
+          echo "Done."
+      
+      - name: Duplicate admin-panel-dev secret for alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_SECRET="admin-panel-dev"
+          NEW_SECRET="admin-panel-alpha-${ENV_NUM}"
+
+          echo "===== DEBUG: Starting secret duplication ====="
+          echo "DEBUG: SOURCE_SECRET=$SOURCE_SECRET"
+          echo "DEBUG: NEW_SECRET=$NEW_SECRET"
+
+          echo "Fetching secret value from $SOURCE_SECRET..."
+          SECRET_VALUE=$(aws secretsmanager get-secret-value \
+            --region "$REGION" \
+            --secret-id "$SOURCE_SECRET" \
+            --query SecretString \
+            --output text)
+
+          echo "DEBUG: Fetched secret value (first 100 chars): ${SECRET_VALUE:0:100}..."
+
+          echo "Checking if $NEW_SECRET already exists..."
+          if aws secretsmanager describe-secret --secret-id "$NEW_SECRET" >/dev/null 2>&1; then
+            echo "Secret $NEW_SECRET already exists — skipping creation."
+          else
+            echo "Creating new secret: $NEW_SECRET"
+            aws secretsmanager create-secret \
+              --name "$NEW_SECRET" \
+              --description "Ephemeral secret for PR ${PR_NUMBER} cloned from website-dev" \
+              --secret-string "$SECRET_VALUE"
+            echo "Secret $NEW_SECRET created successfully."
+          fi
+
+          echo "===== DEBUG: Secret duplication step completed ====="
+
+      - name: Duplicate calendar-common-dev secret for alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_SECRET="calendar-common-dev"
+          NEW_SECRET="calendar-common-alpha-${ENV_NUM}"
+
+          echo "Fetching source secret..."
+          SOURCE_SECRET_VALUE=$(aws secretsmanager get-secret-value \
+            --region "$REGION" \
+            --secret-id "$SOURCE_SECRET" \
+            --query SecretString \
+            --output text)
+
+          echo "Preparing updated secret with new DB_PASSWORD..."
+          UPDATED_SECRET=$(echo "$SOURCE_SECRET_VALUE" | jq \
+            --arg new_password "$MONGO_TARGET_PASSWORD" \
+            '.DB_PASSWORD = $new_password')
+
+          echo "Checking if new secret exists..."
+          if aws secretsmanager describe-secret --region "$REGION" --secret-id "$NEW_SECRET" >/dev/null 2>&1; then
+            echo "Updating ONLY the new secret..."
+
+            aws secretsmanager put-secret-value \
+              --region "$REGION" \
+              --secret-id "$NEW_SECRET" \
+              --secret-string "$UPDATED_SECRET"
+
+          else
+            echo "Creating new secret..."
+
+            aws secretsmanager create-secret \
+              --region "$REGION" \
+              --name "$NEW_SECRET" \
+              --description "Ephemeral secret for alpha environment" \
+              --secret-string "$UPDATED_SECRET"
+          fi
+
+          echo "Done."
+
+      - name: Update SSM after Secret creation
+        if: ${{ env.SECRET_DONE == 'false' }}
+        run: |
+          currentValue=$(aws ssm get-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --query 'Parameter.Value' \
+            --output text)
+
+          if [[ "$currentValue" != *"secret-done"* ]]; then
+            UpdateValue="$currentValue,secret-done"
+          else
+            UpdateValue="$currentValue"
+          fi
+
+          aws ssm put-parameter \
+            --name "${{ github.event.inputs.envName }}-stack" \
+            --value "$UpdateValue" \
+            --type String \
+            --overwrite
+
+  create-image-and-application:
+    runs-on: ubuntu-latest
+    needs: create-secret
+    steps:
+
+      - name: Configure AWS Credentials (Shared Role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: eu-central-1
+          role-to-assume: ${{ secrets.AWS_SHARED_GITHUB_ACTION_ROLE }}
+
+      # Chain to management / target account role
+      - name: Configure AWS Credentials (Chained Role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: eu-central-1
+          role-to-assume: ${{ secrets.AWS_MGMT_ASSUME_ROLE }}
+          role-chaining: true
+          role-session-name: ${{ github.event.repository.name }}
+
+      # Login to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract env number
+        id: extract_env
+        run: |
+          envName="${{ github.event.inputs.envName }}"
+          prefix="alpha"
+          num=${envName#$prefix}
+
+          echo "ENV_NUM=$num" >> $GITHUB_ENV
+
+      - name: Get app_sha of latest commit of acceleratorapp    
+        id: app_sha
+        run: |
+          app_sha=$(curl -s -H "Authorization: Bearer ${{ env.CREATEALPHAPAT }}" https://api.github.com/repos/acceleratorapp/acceleratorapp/branches/${{ github.event.inputs.branch }} | jq -r '.commit.sha')
+          echo $app_sha
+          if [ "$app_sha" == "null" ]; then
+            echo "Error: Branch might be not exist"
+            exit 1
+          fi            
+          echo "Latest commit on ${{ github.event.inputs.branch }} is $app_sha"            
+          echo "image_tag=$app_sha" >> $GITHUB_OUTPUT
+
+      - name: Check if acceleratorapp ECR image exists or not   
+        id: findimage          
+        run: |
+          aws ecr describe-images --repository-name acceleratorapp --registry-id 724563610454 --image-ids imageTag=$IMAGE_TAG --region eu-central-1 || exit 1
+        env:
+          IMAGE_TAG: ${{ steps.app_sha.outputs.image_tag }}
+
+      - name: Add image tag for ArgoCD for acceleratorapp.      
+        id: addImageTagAcc
+        run: |
+          IMAGE_MANIFEST=$(aws ecr batch-get-image --registry-id 724563610454 --repository-name acceleratorapp --image-ids imageTag=$IMAGE_TAG --output json --region eu-central-1 | jq -r '.images[0].imageManifest')
+          NEW_IMAGE_TAG="alpha-mono-${ENV_NUM}-$(echo $IMAGE_TAG | cut -c-7)"
+          aws ecr describe-images --repository-name acceleratorapp --registry-id 724563610454 --image-ids imageTag=$NEW_IMAGE_TAG --region eu-central-1 && exit 0
+          aws ecr put-image --registry-id 724563610454 --region eu-central-1 --repository-name acceleratorapp --image-tag $NEW_IMAGE_TAG --image-manifest "$IMAGE_MANIFEST"
+        env:
+          IMAGE_TAG: ${{ steps.app_sha.outputs.image_tag }}
+
+      - name: Check if acceleratorapp-worker ECR image exists or not   
+        id: findimage_worker          
+        run: |
+          aws ecr describe-images --repository-name acceleratorapp-workers --registry-id 724563610454 --image-ids imageTag=$IMAGE_TAG --region eu-central-1 || exit 1
+        env:
+          IMAGE_TAG: ${{ steps.app_sha.outputs.image_tag }}
+
+      - name: Add image tag for ArgoCD for acceleratorapp worker      
+        id: addImageTagAccWorker
+        run: |
+          IMAGE_MANIFEST=$(aws ecr batch-get-image --registry-id 724563610454 --repository-name acceleratorapp-workers --image-ids imageTag=$IMAGE_TAG --output json --region eu-central-1 | jq -r '.images[0].imageManifest')
+          NEW_IMAGE_TAG="alpha-mono-${ENV_NUM}-$(echo $IMAGE_TAG | cut -c-7)"
+          aws ecr describe-images --repository-name acceleratorapp-workers --registry-id 724563610454 --image-ids imageTag=$NEW_IMAGE_TAG --region eu-central-1 && exit 0
+          aws ecr put-image --registry-id 724563610454 --region eu-central-1 --repository-name acceleratorapp-workers --image-tag $NEW_IMAGE_TAG --image-manifest "$IMAGE_MANIFEST"
+        env:
+          IMAGE_TAG: ${{ steps.app_sha.outputs.image_tag }}
+
+      - name: Get latest stg image tag from admin-panel
+        id: get_latest_admin_panel_stg_tag
+        run: |
+          set -euo pipefail
+
+          REPO_NAME="admin-panel"
+          REGISTRY_ID="724563610454"
+
+          echo "Fetching image details from ECR..."
+
+          LATEST_TAG=$(aws ecr describe-images --registry-id $REGISTRY_ID --repository-name $REPO_NAME --region $REGION --query 'imageDetails[?imageTags!=null]' --output json | jq -r 'sort_by(.imagePushedAt) | reverse | .[].imageTags[] | select(startswith("stg-"))' | head -n 1) && [ -n "$LATEST_TAG" ] || (echo "No stg image found" && exit 1)
+
+          echo "Latest STG image tag: $LATEST_TAG"
+          echo "ADMIN_PANEL_STG_TAG=$LATEST_TAG" >> $GITHUB_ENV
+
+      - name: Get latest stg image tag from availability-private
+        id: get_latest_availability_private_stg_tag
+        run: |
+          set -euo pipefail
+
+          REPO_NAME="availability-private"
+          REGISTRY_ID="724563610454"
+
+          echo "Fetching image details from ECR..."
+
+          LATEST_TAG=$(aws ecr describe-images --registry-id $REGISTRY_ID --repository-name $REPO_NAME --region $REGION --query 'imageDetails[?imageTags!=null]' --output json | jq -r 'sort_by(.imagePushedAt) | reverse | .[].imageTags[] | select(startswith("stg-"))' | head -n 1) && [ -n "$LATEST_TAG" ] || (echo "No stg image found" && exit 1)
+
+          echo "Latest STG image tag: $LATEST_TAG"
+          echo "AVAILABILITY_PRIVATE_STG_TAG=$LATEST_TAG" >> $GITHUB_ENV
+
+      - name: Get latest stg image tag from calendar-private
+        id: get_latest_calendar_private_stg_tag
+        run: |
+          set -euo pipefail
+
+          REPO_NAME="calendar-private"
+          REGISTRY_ID="724563610454"
+
+          echo "Fetching image details from ECR..."
+
+          LATEST_TAG=$(aws ecr describe-images --registry-id $REGISTRY_ID --repository-name $REPO_NAME --region $REGION --query 'imageDetails[?imageTags!=null]' --output json | jq -r 'sort_by(.imagePushedAt) | reverse | .[].imageTags[] | select(startswith("stg-"))' | head -n 1) && [ -n "$LATEST_TAG" ] || (echo "No stg image found" && exit 1)
+
+          echo "Latest STG image tag: $LATEST_TAG"
+          echo "CALENDAR_PRIVATE_STG_TAG=$LATEST_TAG" >> $GITHUB_ENV
+
+      - name: Get latest stg image tag from calendar-public
+        id: get_latest_calendar_public_stg_tag
+        run: |
+          set -euo pipefail
+
+          REPO_NAME="calendar-public"
+          REGISTRY_ID="724563610454"
+
+          echo "Fetching image details from ECR..."
+
+          LATEST_TAG=$(aws ecr describe-images --registry-id $REGISTRY_ID --repository-name $REPO_NAME --region $REGION --query 'imageDetails[?imageTags!=null]' --output json | jq -r 'sort_by(.imagePushedAt) | reverse | .[].imageTags[] | select(startswith("stg-"))' | head -n 1) && [ -n "$LATEST_TAG" ] || (echo "No stg image found" && exit 1)
+
+          echo "Latest STG image tag: $LATEST_TAG"
+          echo "CALENDAR_PUBLIC_STG_TAG=$LATEST_TAG" >> $GITHUB_ENV
+
+      - name: Get latest stg image tag from user-private
+        id: get_latest_user_private_stg_tag
+        run: |
+          set -euo pipefail
+
+          REPO_NAME="user-private"
+          REGISTRY_ID="724563610454"
+
+          echo "Fetching image details from ECR..."
+
+          LATEST_TAG=$(aws ecr describe-images --registry-id $REGISTRY_ID --repository-name $REPO_NAME --region $REGION --query 'imageDetails[?imageTags!=null]' --output json | jq -r 'sort_by(.imagePushedAt) | reverse | .[].imageTags[] | select(startswith("stg-"))' | head -n 1) && [ -n "$LATEST_TAG" ] || (echo "No stg image found" && exit 1)
+
+          echo "Latest STG image tag: $LATEST_TAG"
+          echo "USER_PRIVATE_STG_TAG=$LATEST_TAG" >> $GITHUB_ENV
+
+      - name: Generate preview domain accelerator
+        run: |
+          ACCELERATORAPP_DOMAIN="api-${ENV_NUM}.alpha.gh.acceleratorapp.co"
+          echo "ACCELERATORAPP_DOMAIN=$ACCELERATORAPP_DOMAIN" >> $GITHUB_ENV
+
+          ACCELERATORAPP_INGRESS_DOMAIN="*.api-${ENV_NUM}.alpha.gh.acceleratorapp.co"
+          echo "ACCELERATORAPP_INGRESS_DOMAIN=$ACCELERATORAPP_INGRESS_DOMAIN" >> $GITHUB_ENV
+
+          ACCELERATORAPP_SECOND_INGRESS_DOMAIN="*.alpha.gh.acceleratorapp.co"
+          echo "ACCELERATORAPP_SECOND_INGRESS_DOMAIN=$ACCELERATORAPP_SECOND_INGRESS_DOMAIN" >> $GITHUB_ENV
+
+      - name: Generate preview domain calender
+        run: |
+          CALANDER_DOMAIN="calender-alpha-${ENV_NUM}.alpha.gh.acceleratorapp.co"
+          echo "CALANDER_DOMAIN=$CALANDER_DOMAIN" >> $GITHUB_ENV
+
+      - name: Generate preview domain admin-panel
+        run: |
+          ADMIN_PANEL_DOMAIN="api-${ENV_NUM}-admin.alpha.gh.acceleratorapp.co"
+          echo "ADMIN_PANEL_DOMAIN=$ADMIN_PANEL_DOMAIN" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials (OIDC role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_ROLE }}
+          role-session-name: github-actions-oidc
+          aws-region: ${{ env.REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Configure AWS credentials (EKS access)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.GIT_ACTION_EKS_ROLE }}
+          role-chaining: true
+          role-session-name: github-actions-role-chaining
+          aws-region: ${{ env.REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+
+      - name: Get LoadBalancer DNS
+        id: get-lb
+        run: |
+          LB_HOSTNAME=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "LB_HOSTNAME=$LB_HOSTNAME" >> $GITHUB_ENV
+
+      - name: Create Route53 Record for Acceleratorapp
+        run: |
+          cat > change-batch.json <<EOF
+          {
+            "Comment": "Add/Update record for PR preview",
+            "Changes": [{
+              "Action": "UPSERT",
+              "ResourceRecordSet": {
+                "Name": "${ACCELERATORAPP_DOMAIN}",
+                "Type": "CNAME",
+                "TTL": 60,
+                "ResourceRecords": [{ "Value": "${LB_HOSTNAME}" }]
+              }
+            }]
+          }
+          EOF
+
+          aws route53 change-resource-record-sets \
+            --hosted-zone-id $HOSTEDZONE_ID \
+            --change-batch file://change-batch.json
+        
+      - name: Create Route53 Record for Calender
+        run: |
+          cat > change-batch.json <<EOF
+          {
+            "Comment": "Add/Update record for PR preview",
+            "Changes": [{
+              "Action": "UPSERT",
+              "ResourceRecordSet": {
+                "Name": "${CALANDER_DOMAIN}",
+                "Type": "CNAME",
+                "TTL": 60,
+                "ResourceRecords": [{ "Value": "${LB_HOSTNAME}" }]
+              }
+            }]
+          }
+          EOF
+
+          aws route53 change-resource-record-sets \
+            --hosted-zone-id $HOSTEDZONE_ID \
+            --change-batch file://change-batch.json
+
+      - name: Create Route53 Record for Admin-Panel
+        run: |
+          cat > change-batch.json <<EOF
+          {
+            "Comment": "Add/Update record for PR preview",
+            "Changes": [{
+              "Action": "UPSERT",
+              "ResourceRecordSet": {
+                "Name": "${ADMIN_PANEL_DOMAIN}",
+                "Type": "CNAME",
+                "TTL": 60,
+                "ResourceRecords": [{ "Value": "${LB_HOSTNAME}" }]
+              }
+            }]
+          }
+          EOF
+
+          aws route53 change-resource-record-sets \
+            --hosted-zone-id $HOSTEDZONE_ID \
+            --change-batch file://change-batch.json
+
+      - name: URL Updation for Acceleratorapp.
+        run: |
+          USER_INTEGRATION_URL="http://users-private-alpha-${ENV_NUM}.alpha-monolith-${ENV_NUM}.svc.cluster.local:9000/graphql"
+          echo "USER_INTEGRATION_URL=$USER_INTEGRATION_URL" >> $GITHUB_ENV
+
+          REDIS_URL="redis://revvly-api-dev-redis-master:6379"
+          echo "REDIS_URL=$REDIS_URL" >> $GITHUB_ENV
+
+          AVAILABILITY_INTEGRATION_URL="http://availability-private-alpha-${ENV_NUM}.alpha-monolith-${ENV_NUM}.svc.cluster.local:9001/graphql"
+          echo "AVAILABILITY_INTEGRATION_URL=$AVAILABILITY_INTEGRATION_URL" >> $GITHUB_ENV
+
+          CALENDAR_INTEGRATION_URL="http://calendar-private-alpha-${ENV_NUM}.alpha-monolith-${ENV_NUM}.svc.cluster.local:9002/graphql"
+          echo "CALENDAR_INTEGRATION_URL=$CALENDAR_INTEGRATION_URL" >> $GITHUB_ENV
+
+          APP_DOMAIN="alpha${ENV_NUM}.acceleratorapp.co"
+          echo "APP_DOMAIN=$APP_DOMAIN" >> $GITHUB_ENV
+
+          GOOGLE_REDIRECT_URI_DOMAIN="dev.api.alpha${ENV_NUM}.acceleratorapp.co"
+          echo "GOOGLE_REDIRECT_URI_DOMAIN=$GOOGLE_REDIRECT_URI_DOMAIN" >> $GITHUB_ENV
+
+      - name: Create Route53 Record for APP Domain
+        run: |
+          cat > change-batch.json <<EOF
+          {
+            "Comment": "Add/Update record for PR preview",
+            "Changes": [{
+              "Action": "UPSERT",
+              "ResourceRecordSet": {
+                "Name": "${APP_DOMAIN}",
+                "Type": "CNAME",
+                "TTL": 60,
+                "ResourceRecords": [{ "Value": "${LB_HOSTNAME}" }]
+              }
+            }]
+          }
+          EOF
+
+          aws route53 change-resource-record-sets \
+            --hosted-zone-id $HOSTEDZONE_ID \
+            --change-batch file://change-batch.json
+
+      - name: URL Updation for Admin Panel.
+        run: |
+         EXTERNAL_API_ENDPOINT="http://acceleratorapp-alpha-${ENV_NUM}.alpha-monolith-${ENV_NUM}.svc.cluster.local/api/admin-panel"
+         echo "EXTERNAL_API_ENDPOINT=$EXTERNAL_API_ENDPOINT" >> $GITHUB_ENV
+
+      - name: URL Updation for calendar private
+        run: |
+          DB_HOST="postgres"
+          echo "DB_HOST=$DB_HOST" >> $GITHUB_ENV
+
+          DELIVERY_ADDRESS="https://calender-alpha-${ENV_NUM}.alpha.gh.acceleratorapp.co"
+          echo "DELIVERY_ADDRESS=$DELIVERY_ADDRESS" >> $GITHUB_ENV
+
+          CALENDAR_SECRET="calendar-common-alpha-${ENV_NUM}"
+          echo "CALENDAR_SECRET=$CALENDAR_SECRET" >> $GITHUB_ENV
+
+      - name: Create Application for admin_panel
+        run: |
+          echo "$ADMIN_PANEL_APPLICATION" > admin_panel_application.yaml
+
+          yq -i '.metadata.annotations["argocd-image-updater.argoproj.io/aawebsite.allow-tags"] = "regexp:^stg-[0-9a-zA-Z]+$"' admin_panel_application.yaml
+
+          yq -i ".metadata.name = \"admin-panel-alpha-${ENV_NUM}\"" admin_panel_application.yaml
+
+          yq -i ".spec.destination.namespace = \"alpha-monolith-${ENV_NUM}\"" admin_panel_application.yaml
+
+          yq -i ".spec.source.helm.releaseName = \"admin-panel-alpha-${ENV_NUM}\"" admin_panel_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.EXTERNAL_API_ENDPOINT", "value": strenv(EXTERNAL_API_ENDPOINT)}]' admin_panel_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "image.tag", "value": strenv(ADMIN_PANEL_STG_TAG)}]' admin_panel_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "ingress.rules[0].host", "value": strenv(ADMIN_PANEL_DOMAIN)}]' admin_panel_application.yaml
+
+          echo "=== Final admin_panel_application.yaml ==="
+          cat admin_panel_application.yaml
+          echo "============================="
+  
+          kubectl apply -f admin_panel_application.yaml
+
+      - name: Create Application for calendar_private
+        run: |
+          echo "$CALENDAR_PRIVATE_APPLICATION" > calendar_private_application.yaml
+
+          yq -i '.metadata.annotations["argocd-image-updater.argoproj.io/aawebsite.allow-tags"] = "regexp:^stg-[0-9a-zA-Z]+$"' calendar_private_application.yaml
+
+          yq -i ".metadata.name = \"calendar-private-alpha-${ENV_NUM}\"" calendar_private_application.yaml
+
+          yq -i ".spec.destination.namespace = \"alpha-monolith-${ENV_NUM}\"" calendar_private_application.yaml
+
+          yq -i ".spec.source.helm.releaseName = \"calendar-private-alpha-${ENV_NUM}\"" calendar_private_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.DB_HOST", "value": strenv(DB_HOST)}]' calendar_private_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.DELIVERY_ADDRESS", "value": strenv(DELIVERY_ADDRESS)}]' calendar_private_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "image.tag", "value": strenv(CALENDAR_PRIVATE_STG_TAG)}]' calendar_private_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "appSecret.name", "value": strenv(CALENDAR_SECRET)}]' calendar_private_application.yaml
+
+          echo "=== Final calendar_private_application.yaml ==="
+          cat calendar_private_application.yaml
+          echo "============================="
+  
+          kubectl apply -f calendar_private_application.yaml
+
+      - name: Create Application for calendar_public
+        run: |
+          echo "$CALENDAR_PUBLIC_APPLICATION" > calendar_public_application.yaml
+
+          yq -i '.metadata.annotations["argocd-image-updater.argoproj.io/aawebsite.allow-tags"] = "regexp:^stg-[0-9a-zA-Z]+$"' calendar_public_application.yaml
+
+          yq -i ".metadata.name = \"calendar-public-alpha-${ENV_NUM}\"" calendar_public_application.yaml
+
+          yq -i ".spec.destination.namespace = \"alpha-monolith-${ENV_NUM}\"" calendar_public_application.yaml
+
+          yq -i ".spec.source.helm.releaseName = \"calendar-public-alpha-${ENV_NUM}\"" calendar_public_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.DB_HOST", "value": strenv(DB_HOST)}]' calendar_public_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "image.tag", "value": strenv(CALENDAR_PUBLIC_STG_TAG)}]' calendar_public_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "appSecret.name", "value": strenv(CALENDAR_SECRET)}]' calendar_public_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "ingress.rules[0].host", "value": strenv(CALANDER_DOMAIN)}]' calendar_public_application.yaml
+
+          echo "=== Final calendar_public_application.yaml ==="
+          cat calendar_public_application.yaml
+          echo "============================="
+  
+          kubectl apply -f calendar_public_application.yaml
+      
+      - name: Create Application for availability_private
+        run: |
+          echo "$AVAILABILITY_PRIVATE_APPLICATION" > availability_private_application.yaml
+
+          yq -i '.metadata.annotations["argocd-image-updater.argoproj.io/aawebsite.allow-tags"] = "regexp:^stg-[0-9a-zA-Z]+$"' availability_private_application.yaml
+
+          yq -i ".metadata.name = \"availability-private-alpha-${ENV_NUM}\"" availability_private_application.yaml
+
+          yq -i ".spec.destination.namespace = \"alpha-monolith-${ENV_NUM}\"" availability_private_application.yaml
+
+          yq -i ".spec.source.helm.releaseName = \"availability-private-alpha-${ENV_NUM}\"" availability_private_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.DB_HOST", "value": strenv(DB_HOST)}]' availability_private_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "image.tag", "value": strenv(AVAILABILITY_PRIVATE_STG_TAG)}]' availability_private_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "appSecret.name", "value": strenv(CALENDAR_SECRET)}]' availability_private_application.yaml
+
+          echo "=== Final availability_private_application.yaml ==="
+          cat availability_private_application.yaml
+          echo "============================="
+  
+          kubectl apply -f availability_private_application.yaml
+
+      - name: Create Application for user_private
+        run: |
+          echo "$USER_PRIVATE_APPLICATION" > user_private_application.yaml
+
+          yq -i '.metadata.annotations["argocd-image-updater.argoproj.io/aawebsite.allow-tags"] = "regexp:^stg-[0-9a-zA-Z]+$"' user_private_application.yaml
+
+          yq -i ".metadata.name = \"user-private-alpha-${ENV_NUM}\"" user_private_application.yaml
+
+          yq -i ".spec.destination.namespace = \"alpha-monolith-${ENV_NUM}\"" user_private_application.yaml
+
+          yq -i ".spec.source.helm.releaseName = \"user-private-alpha-${ENV_NUM}\"" user_private_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.DB_HOST", "value": strenv(DB_HOST)}]' user_private_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "image.tag", "value": strenv(USER_PRIVATE_STG_TAG)}]' user_private_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "appSecret.name", "value": strenv(CALENDAR_SECRET)}]' user_private_application.yaml
+
+          echo "=== Final user_private_application.yaml ==="
+          cat user_private_application.yaml
+          echo "============================="
+  
+          kubectl apply -f user_private_application.yaml
+
+      - name: Create Application for acceleratorapp-worker
+        run: |
+
+          echo "$ACCLERATORAPP_WORKER_APPLICATION" > acceleratorapp_worker_application.yaml
+
+          yq -i '.metadata.annotations["argocd-image-updater.argoproj.io/aawebsite.allow-tags"] = "regexp:^alpha-mono-${ENV_NUM}-[0-9a-zA-Z]+$"' acceleratorapp_worker_application.yaml
+
+          yq -i ".metadata.name = \"workers-alpha-${ENV_NUM}\"" acceleratorapp_worker_application.yaml
+
+          yq -i ".spec.destination.namespace = \"alpha-monolith-${ENV_NUM}\"" acceleratorapp_worker_application.yaml
+
+          yq -i '.spec.syncPolicy.syncOptions += ["CreateNamespace=true"]' acceleratorapp_worker_application.yaml
+
+          yq -i ".spec.source.helm.releaseName = \"workers-alpha-${ENV_NUM}\"" acceleratorapp_worker_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.AVAILABILITY_INTEGRATION_URL", "value": strenv(AVAILABILITY_INTEGRATION_URL)}]' acceleratorapp_worker_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.CALENDAR_INTEGRATION_URL", "value": strenv(CALENDAR_INTEGRATION_URL)}]' acceleratorapp_worker_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.USER_INTEGRATION_URL", "value": strenv(USER_INTEGRATION_URL)}]' acceleratorapp_worker_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.REDIS_URL", "value": strenv(REDIS_URL)}]' acceleratorapp_worker_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.APP_DOMAIN", "value": strenv(APP_DOMAIN)}]' acceleratorapp_worker_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.GOOGLE_REDIRECT_URI_DOMAIN", "value": strenv(GOOGLE_REDIRECT_URI_DOMAIN)}]' acceleratorapp_worker_application.yaml
+
+          echo "=== Final acceleratorapp_worker_application.yaml ==="
+          cat acceleratorapp_worker_application.yaml
+          echo "============================="
+  
+          kubectl apply -f acceleratorapp_worker_application.yaml
+
+      - name: Create Application for acceleratorapp
+        run: |
+          echo "$ACCLERATORAPP_APPLICATION" > acceleratorapp_application.yaml
+
+          yq -i '.metadata.annotations["argocd-image-updater.argoproj.io/aawebsite.allow-tags"] = "regexp:^alpha-mono-${ENV_NUM}-[0-9a-zA-Z]+$"' acceleratorapp_application.yaml
+
+          yq -i ".metadata.name = \"acceleratorapp-alpha-${ENV_NUM}\"" acceleratorapp_application.yaml
+
+          yq -i ".spec.destination.namespace = \"alpha-monolith-${ENV_NUM}\"" acceleratorapp_application.yaml
+
+          yq -i '.spec.syncPolicy.syncOptions += ["CreateNamespace=true"]' acceleratorapp_application.yaml
+
+          yq -i ".spec.source.helm.releaseName = \"acceleratorapp-alpha-${ENV_NUM}\"" acceleratorapp_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "ingress.rules[0].host", "value": strenv(ACCELERATORAPP_INGRESS_DOMAIN)}]' acceleratorapp_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "ingress.rules[1].host", "value": strenv(ACCELERATORAPP_SECOND_INGRESS_DOMAIN)}]' acceleratorapp_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.AVAILABILITY_INTEGRATION_URL", "value": strenv(AVAILABILITY_INTEGRATION_URL)}]' acceleratorapp_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.CALENDAR_INTEGRATION_URL", "value": strenv(CALENDAR_INTEGRATION_URL)}]' acceleratorapp_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.USER_INTEGRATION_URL", "value": strenv(USER_INTEGRATION_URL)}]' acceleratorapp_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.REDIS_URL", "value": strenv(REDIS_URL)}]' acceleratorapp_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.APP_DOMAIN", "value": strenv(APP_DOMAIN)}]' acceleratorapp_application.yaml
+
+          yq -i '.spec.source.helm.parameters += [{"name": "configMap.data.GOOGLE_REDIRECT_URI_DOMAIN", "value": strenv(GOOGLE_REDIRECT_URI_DOMAIN)}]' acceleratorapp_application.yaml
+
+
+          echo "=== Final application.yaml ==="
+          cat acceleratorapp_application.yaml
+          echo "============================="
+  
+          kubectl apply -f acceleratorapp_application.yaml
+        
