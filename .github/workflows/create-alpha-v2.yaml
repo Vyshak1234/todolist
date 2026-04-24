@@ -221,10 +221,7 @@ jobs:
       - name: Set up mongodb restore
         run: envsubst < .github/workflows/k8s/jobs/alpha/mongo/mongo-restore.yaml | kubectl apply -f - -n alpha-monolith-${ENV_NUM}
         env:
-          SOURCE_URI: ${{ 
-            github.event.inputs.database == 'Dev' && secrets.MONGO_SOURCE_URI_DEV || 
-            secrets.MONGO_SOURCE_URI_STG 
-          }}
+          SOURCE_URI: ${{ github.event.inputs.database == 'Dev' && secrets.MONGO_SOURCE_URI_DEV || secrets.MONGO_SOURCE_URI_STG }}
           MONGO_TARGET_USERNAME: ${{ env.MONGO_TARGET_USERNAME }}
           MONGO_TARGET_PASSWORD: ${{ env.MONGO_TARGET_PASSWORD }}
 
